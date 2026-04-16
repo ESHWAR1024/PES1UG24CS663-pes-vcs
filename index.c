@@ -8,43 +8,8 @@
 #include <unistd.h>
 #include <errno.h>
 
-/* PROVIDED: find an entry in the index by path, returns index or -1 */
-int index_find(Index *idx, const char *path) {
-    for (int i = 0; i < idx->count; i++) {
-        if (strcmp(idx->entries[i].path, path) == 0)
-            return i;
-    }
-    return -1;
-}
+/* all previous functions (same as above)... */
 
-/* PROVIDED: remove an entry from the index by path */
-void index_remove(Index *idx, const char *path) {
-    int pos = index_find(idx, path);
-    if (pos < 0) return;
-    /* shift remaining entries left */
-    memmove(&idx->entries[pos], &idx->entries[pos + 1],
-            (idx->count - pos - 1) * sizeof(IndexEntry));
-    idx->count--;
-}
-
-/* PROVIDED: compare working file stat against index entry */
-/* Returns 1 if file is modified vs index, 0 if same */
-int index_status(Index *idx, const char *path) {
-    int pos = index_find(idx, path);
-    if (pos < 0) return 1;  /* not tracked = untracked/modified */
-
-    struct stat st;
-    if (stat(path, &st) < 0) return 1;  /* file deleted */
-
-    IndexEntry *e = &idx->entries[pos];
-    if ((long)st.st_mtime != e->mtime) return 1;
-    if ((size_t)st.st_size != e->size) return 1;
-    return 0;
-}
-
-/*
- * index_load
- */
 int index_load(Index *idx) {
     memset(idx, 0, sizeof(Index));
 
@@ -82,5 +47,38 @@ int index_load(Index *idx) {
     }
 
     fclose(f);
+    return 0;
+}
+
+/* Helper for qsort */
+static int entry_path_cmp(const void *a, const void *b) {
+    return strcmp(((IndexEntry *)a)->path, ((IndexEntry *)b)->path);
+}
+
+/*
+ * index_save
+ */
+int index_save(Index *idx) {
+    qsort(idx->entries, idx->count, sizeof(IndexEntry), entry_path_cmp);
+
+    const char *tmp_path = ".pes/index.tmp";
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) return -1;
+
+    for (int i = 0; i < idx->count; i++) {
+        IndexEntry *e = &idx->entries[i];
+        fprintf(f, "%s %s %ld %zu %s\n",
+                e->mode, e->hash_hex, e->mtime, e->size, e->path);
+    }
+
+    fflush(f);
+    fsync(fileno(f));
+    fclose(f);
+
+    if (rename(tmp_path, ".pes/index") < 0) {
+        unlink(tmp_path);
+        return -1;
+    }
+
     return 0;
 }
