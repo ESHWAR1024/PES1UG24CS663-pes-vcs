@@ -1,4 +1,3 @@
-cat tree.c
 // tree.c — Tree object serialization and construction
 //
 // PROVIDED functions: get_file_mode, tree_parse, tree_serialize
@@ -11,11 +10,15 @@ cat tree.c
 //   "100644 hello.txt\0" followed by 32 raw bytes of SHA-256
 
 #include "tree.h"
+#include "index.h"
+#include "pes.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+
+extern int object_write(ObjectType type,const void *data,size_t len,ObjectID *id_out);
 
 // ─── Mode Constants ─────────────────────────────────────────────────────────
 
@@ -125,12 +128,126 @@ int tree_serialize(const Tree *tree, void **data_out, size_t *len_out) {
 //   - strchr          : find the first '/' in a path to separate directories from files
 //   - strncmp         : compare prefixes to group files belonging to the same subdirectory
 //   - Recursion       : you will likely want to create a recursive helper function 
-//                       (e.g., write_tree_level(entries, count, depth)) to handle nested dirs.
+//                       (e.g., `write_tree_level(entries, count, depth)`) to handle nested dirs.
 //   - tree_serialize  : convert your populated Tree struct into a binary buffer
 //   - object_write    : save that binary buffer to the store as OBJ_TREE
 //
 // Returns 0 on success, -1 on error.
-int tree_from_index(ObjectID *id_out) {
-    (void)id_out;
+typedef struct {
+    uint32_t mode;
+    ObjectID hash;
+    char path[256];
+} TempEntry;
+
+static int build_tree_level(TempEntry *entries, int count, const char *prefix, ObjectID *id_out)
+{
+    Tree tree;
+    tree.count = 0;
+    for (int i = 0; i < count; i++) {
+
+        const char *rel = entries[i].path;
+
+        if (prefix && strncmp(rel, prefix, strlen(prefix)) != 0)
+            continue;
+
+        const char *name = prefix ? rel + strlen(prefix) : rel;
+
+        if (strchr(name, '/') != NULL)
+            continue;
+
+        TreeEntry *t = &tree.entries[tree.count++];
+
+        t->mode = entries[i].mode;
+        strcpy(t->name, name);
+        t->hash = entries[i].hash;
+    }
+    for (int i = 0; i < count; i++) {
+
+        const char *rel = entries[i].path;
+
+        if (prefix && strncmp(rel, prefix, strlen(prefix)) != 0)
+            continue;
+
+        const char *name = prefix ? rel + strlen(prefix) : rel;
+
+        char *slash = strchr(name, '/');
+        if (!slash)
+            continue;
+
+        char dirname[256];
+        strncpy(dirname, name, slash - name);
+        dirname[slash - name] = '\0';
+
+        int exists = 0;
+        for (int j = 0; j < tree.count; j++)
+            if (strcmp(tree.entries[j].name, dirname) == 0)
+                exists = 1;
+
+        if (exists)
+            continue;
+
+        char new_prefix[256];
+    if (snprintf(new_prefix,
+                sizeof(new_prefix),
+                "%s%s/",
+                prefix ? prefix : "",
+                dirname) >= (int)sizeof(new_prefix)) {
+        return -1;
+    }
+new_prefix[sizeof(new_prefix) - 1] = '\0';
+
+        ObjectID sub_id;
+
+        if (build_tree_level(entries, count,
+                            new_prefix,
+                            &sub_id) != 0)
+            return -1;
+
+        TreeEntry *t = &tree.entries[tree.count++];
+
+        t->mode = MODE_DIR;
+        strcpy(t->name, dirname);
+        t->hash = sub_id;
+    }
+    void *data;
+    size_t len;
+
+    if (tree_serialize(&tree, &data, &len) != 0)
+        return -1;
+
+    if (object_write(OBJ_TREE, data, len, id_out) != 0) {
+        free(data);
+        return -1;
+    }
+
+    free(data);
     return 0;
+}
+
+int tree_from_index(ObjectID *id_out) {
+    FILE *fp = fopen(".pes/index", "r");
+    if (!fp) return -1;
+
+    TempEntry entries[256];
+    int count = 0;
+
+    while (!feof(fp)) {
+        char hash_hex[HASH_HEX_SIZE + 1];
+        long mtime;
+        size_t size;
+
+        if (fscanf(fp, "%o %64s %ld %zu %255s\n",
+                &entries[count].mode,
+                hash_hex,
+                &mtime,
+                &size,
+                entries[count].path) == 5) {
+
+            hex_to_hash(hash_hex, &entries[count].hash);
+            count++;
+        }
+    }
+
+    fclose(fp);
+    return build_tree_level(entries, count, NULL, id_out);
 }
